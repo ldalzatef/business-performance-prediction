@@ -1,1 +1,15 @@
 *.pyc
+# Ignorar el entorno virtual
+.venv/
+venv/
+env/
+
+# Ignorar archivos compilados de Python (basura)
+__pycache__/
+*.py[cod]
+
+# Ignorar configuraciones locales de VS Code (opcional)
+.vscode/
+
+# Ignorar archivos de sistema
+.DS_Store
