@@ -1,5 +1,9 @@
 # Valora — Predicción de desempeño empresarial por sector
 
+Enlace
+-----------------
+https://valoracolombia.streamlit.app/
+
 Resumen ejecutivo
 -----------------
 Valora es una herramienta desarrollada para fortalecer la capacidad institucional de estimar el crecimiento y las ganancias esperadas de las empresas en Colombia por sector económico. A partir de información histórica de las 10.000 empresas más grandes del país, Valora integra análisis descriptivo y modelos predictivos en un dashboard interactivo que facilita la toma de decisiones estratégicas en inversión, política pública y desarrollo empresarial.
