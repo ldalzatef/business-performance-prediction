@@ -6,11 +6,9 @@ import plotly.express as px
 import plotly.graph_objects as go
 import os
 import sys
-import requests
 
-# Agregar la raíz del proyecto al path
+# Agregar path para importar utils
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
 from src.utils import procesar_datos_usuario, predecir_ganancia_futura
 
 # --- 1. CONFIGURACIÓN DE PÁGINA ---
@@ -24,6 +22,7 @@ st.set_page_config(
 # --- ESTILOS CSS ---
 st.markdown("""
 <style>
+    /* Tarjetas de métricas */
     .metric-card {
         background-color: var(--secondary-background-color);
         border-left: 5px solid #636EFA;
@@ -31,18 +30,68 @@ st.markdown("""
         border-radius: 5px;
         margin-bottom: 10px;
     }
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 24px;
+    
+    /* FOOTER ESTÁTICO */
+    .footer {
+        width: 100%;
+        margin-top: 50px;
+        padding: 30px 0px;
+        border-top: 1px solid var(--secondary-background-color);
+        text-align: center;
+        color: var(--text-color);
+        background-color: var(--background-color);
     }
-    .stTabs [data-baseweb="tab"] {
-        height: 50px;
-        white-space: pre-wrap;
+    
+    .footer-content {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        gap: 20px;
+        flex-wrap: wrap;
+    }
+    
+    .footer-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 14px;
+    }
+    
+    .footer a {
+        color: #636EFA;
+        text-decoration: none;
         font-weight: 600;
+        transition: color 0.3s;
     }
+    
+    .footer a:hover {
+        color: #00CC96;
+        text-decoration: underline;
+    }
+    
+    .team-title {
+        font-size: 12px;
+        color: gray;
+        margin-bottom: 10px;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+    }
+    
+    /* Ajuste para que el footer no tape el contenido final */
+    .block-container { padding-bottom: 50px; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 2. FUNCIONES DE CARGA ---
+# --- 2. FUNCIONES DE CARGA Y CÁLCULO ---
+
+def calcular_ratios(df):
+    """Calcula ratios financieros básicos sobre un DataFrame dado"""
+    df['ROA'] = df['GANANCIA (PÉRDIDA)'] / df['TOTAL ACTIVOS'].replace(0, np.nan)
+    df['ENDEUDAMIENTO'] = df['TOTAL PASIVOS'] / df['TOTAL ACTIVOS'].replace(0, np.nan)
+    df['MARGEN_NETO'] = df['GANANCIA (PÉRDIDA)'] / df['INGRESOS OPERACIONALES'].replace(0, np.nan)
+    df['ROTACION_ACTIVOS'] = df['INGRESOS OPERACIONALES'] / df['TOTAL ACTIVOS'].replace(0, np.nan)
+    return df
+
 @st.cache_resource
 def cargar_modelo():
     try:
@@ -57,7 +106,6 @@ def cargar_datos_mercado():
         return None
     df = pd.read_csv(ruta_csv)
     
-    # Limpieza Básica
     cols_num = ['INGRESOS OPERACIONALES', 'GANANCIA (PÉRDIDA)', 'TOTAL ACTIVOS', 'TOTAL PASIVOS', 'TOTAL PATRIMONIO']
     for col in cols_num:
         if df[col].dtype == 'O':
@@ -67,18 +115,64 @@ def cargar_datos_mercado():
     if 'Año de Corte' in df.columns:
         df['Año de Corte'] = pd.to_numeric(df['Año de Corte'].astype(str).str.replace(',', ''), errors='coerce')
     
-    # --- CONVERSIÓN A MILLONES (VISUALIZACIÓN) ---
-    # El dataset original está en "Miles de Millones". 
-    # Multiplicamos por 1,000 para que todo el dashboard esté en "Millones".
+    # CONVERSIÓN A MILLONES
     for col in cols_num:
         df[col] = df[col] * 1000
 
-    # Ratios Globales (Estos no cambian con la escala)
-    df['ROA'] = df['GANANCIA (PÉRDIDA)'] / df['TOTAL ACTIVOS'].replace(0, np.nan)
-    df['ENDEUDAMIENTO'] = df['TOTAL PASIVOS'] / df['TOTAL ACTIVOS'].replace(0, np.nan)
-    df['MARGEN_NETO'] = df['GANANCIA (PÉRDIDA)'] / df['INGRESOS OPERACIONALES'].replace(0, np.nan)
-    
+    df = calcular_ratios(df)
     return df
+
+def simular_futuro_sectores(df_actual, modelo):
+    df_sectores = df_actual.groupby('MACROSECTOR').agg({
+        'TOTAL ACTIVOS': 'median', 'TOTAL PASIVOS': 'median',
+        'TOTAL PATRIMONIO': 'median', 'INGRESOS OPERACIONALES': 'median',
+        'GANANCIA (PÉRDIDA)': 'median',
+    }).reset_index()
+    
+    nuevas_ganancias = []
+    for _, row in df_sectores.iterrows():
+        inputs = {
+            'TOTAL ACTIVOS': row['TOTAL ACTIVOS'] / 1000,
+            'TOTAL PASIVOS': row['TOTAL PASIVOS'] / 1000,
+            'TOTAL PATRIMONIO': row['TOTAL PATRIMONIO'] / 1000,
+            'INGRESOS OPERACIONALES': row['INGRESOS OPERACIONALES'] / 1000,
+            'GANANCIA_ANTERIOR': row['GANANCIA (PÉRDIDA)'] / 1000,
+            'MACROSECTOR': row['MACROSECTOR'], 'REGIÓN': 'Bogotá - Cundinamarca'
+        }
+        try:
+            df_proc = procesar_datos_usuario(inputs)
+            delta_pred = modelo.predict(df_proc)[0]
+            ganancia_futura = (inputs['GANANCIA_ANTERIOR'] + delta_pred) * 1000 
+            nuevas_ganancias.append(ganancia_futura)
+        except: nuevas_ganancias.append(row['GANANCIA (PÉRDIDA)'])
+            
+    df_sectores['GANANCIA (PÉRDIDA)'] = nuevas_ganancias
+    df_sectores = calcular_ratios(df_sectores)
+    return df_sectores
+
+def simular_futuro_empresas(df_empresas, modelo):
+    nuevas_ganancias = []
+    for _, row in df_empresas.iterrows():
+        inputs = {
+            'TOTAL ACTIVOS': row['TOTAL ACTIVOS'] / 1000,
+            'TOTAL PASIVOS': row['TOTAL PASIVOS'] / 1000,
+            'TOTAL PATRIMONIO': row['TOTAL PATRIMONIO'] / 1000,
+            'INGRESOS OPERACIONALES': row['INGRESOS OPERACIONALES'] / 1000,
+            'GANANCIA_ANTERIOR': row['GANANCIA (PÉRDIDA)'] / 1000,
+            'MACROSECTOR': row['MACROSECTOR'], 'REGIÓN': row['REGIÓN']
+        }
+        try:
+            df_proc = procesar_datos_usuario(inputs)
+            delta_pred = modelo.predict(df_proc)[0]
+            ganancia_futura = (inputs['GANANCIA_ANTERIOR'] + delta_pred) * 1000
+            nuevas_ganancias.append(ganancia_futura)
+        except:
+            nuevas_ganancias.append(row['GANANCIA (PÉRDIDA)'])
+    
+    df_simulado = df_empresas.copy()
+    df_simulado['GANANCIA (PÉRDIDA)'] = nuevas_ganancias
+    df_simulado = calcular_ratios(df_simulado)
+    return df_simulado
 
 modelo_delta = cargar_modelo()
 df_mercado = cargar_datos_mercado()
@@ -87,440 +181,274 @@ if not modelo_delta or df_mercado is None:
     st.error("⚠️ Error Crítico: No se encuentran los modelos o datos.")
     st.stop()
 
-# --- 3. BARRA LATERAL ---
+# --- 3. SIDEBAR ---
 with st.sidebar:
-    st.title("💎 Valora")
+    # 1. LOGO DE LA APP
+    # Asegúrate de que el archivo esté en la carpeta app/
+    logo_path = "app/LOGO VALORA.png" 
+    
+    if os.path.exists(logo_path):
+        st.image(logo_path, width=180) 
+    else:
+        st.markdown("<h1 style='text-align: center;'>💎</h1>", unsafe_allow_html=True)
+
+    st.title("Valora")
     st.caption("Predicción de Crecimiento Financiero")
     
-    with st.expander("📖 Sobre la Herramienta"):
-        st.write("""
-        **Valora** utiliza Inteligencia Artificial para estimar la inercia de crecimiento.
-        
-        *Unidades:* Todas las cifras monetarias están expresadas en **Millones de Pesos (COP)**.
-        """)
+    with st.expander("📖 Fuente de Datos"):
+        st.write("Análisis basado en las 10,000 empresas más grandes de Colombia.")
+        st.markdown("[🔗 Ver Datos Abiertos (Gov.co)](https://www.datos.gov.co/Comercio-Industria-y-Turismo/10-000-Empresas-mas-Grandes-del-Pa-s/6cat-2gcs/about_data)")
     
     st.divider()
-    st.header("🌍 Configuración de Mercado")
+    st.header("🌍 Filtros de Detalle")
     
     sectores = sorted(df_mercado['MACROSECTOR'].unique().astype(str))
     sector_sel = st.selectbox("Sector Económico", sectores, index=sectores.index('COMERCIO') if 'COMERCIO' in sectores else 0)
     
     regiones = sorted(df_mercado['REGIÓN'].unique().astype(str))
-    region_sel = st.selectbox("Región Geográfica", regiones, index=regiones.index('Bogotá - Cundinamarca') if 'Bogotá - Cundinamarca' in regiones else 0)
-
-    st.info("💡 Los gráficos se actualizarán según estos filtros.")
-
-# --- LÓGICA DE FILTRADO ---
-df_sector = df_mercado[df_mercado['MACROSECTOR'] == sector_sel]
-df_filtrado = df_sector[df_sector['REGIÓN'] == region_sel]
-anio_max = int(df_mercado['Año de Corte'].max())
+    region_sel = st.selectbox("Región / Dpto.", regiones, index=regiones.index('Bogotá - Cundinamarca') if 'Bogotá - Cundinamarca' in regiones else 0)
 
 # --- 4. PANEL PRINCIPAL ---
-st.title(f"Panorama: {sector_sel}")
-st.markdown(f"Análisis estratégico en **{region_sel}** (Cifras en Millones de COP).")
+st.title("Panorama Empresarial Colombiano")
 
-tab_global, tab_macro, tab_micro = st.tabs(["🌐 Análisis Global (Visión)", "📊 Pulso del Mercado (Macro)", "🚀 Simulador de Crecimiento (IA)"])
+tab_global, tab_sector, tab_simulador = st.tabs([
+    "🌍 Visión Global IA", 
+    "📊 Contexto Sectorial", 
+    "🔮 Simulador IA"
+])
 
-# ======================================================================
-# PESTAÑA 1: GLOBAL (nuevo)
-# ======================================================================
+anio_max = int(df_mercado['Año de Corte'].max())
+df_historico_anio = df_mercado[df_mercado['Año de Corte'] == anio_max].copy()
+df_historico_anio = calcular_ratios(df_historico_anio)
+
+# ==============================================================================
+# PESTAÑA 1: VISIÓN GLOBAL
+# ==============================================================================
 with tab_global:
-    # Insertamos el expander global (copia del bloque original)
-    # --- ANÁLISIS GLOBAL (Visión previa a filtros por sector/región) ---
-    with st.expander("🌐 Análisis Global (Visión Agregada)", expanded=False):
-        st.write("Resumen agregado de la muestra completa — por sector y por región. Puedes optar por usar las predicciones del modelo (más precisas, pero más lentas) o analizar cambios históricos.")
-
-        use_model = st.checkbox("Usar predicciones del modelo para el análisis (más preciso, puede tardar)", value=False)
-
-        geojson_path = os.path.join('data', 'colombia_departments.geojson')
-        if not os.path.exists(geojson_path):
-            if st.button("Descargar geojson de departamentos (opcional)"):
-                # Lista de URLs alternativas (intentar en orden hasta encontrar una válida)
-                candidatos = [
-                    'https://raw.githubusercontent.com/marcovega/colombia-json/master/colombia_departments.geojson',
-                    'https://raw.githubusercontent.com/kelvins/mas-utils/master/geojson/colombia_departamentos.geojson',
-                    'https://raw.githubusercontent.com/martinzlopez/colombia-geojson/master/departamentos.geojson',
-                    'https://raw.githubusercontent.com/juanelas/colombia-geojson/master/colombia_departments.geojson',
-                ]
-                ok = False
-                for download_url in candidatos:
-                    try:
-                        r = requests.get(download_url, timeout=10)
-                        r.raise_for_status()
-                        with open(geojson_path, 'wb') as f:
-                            f.write(r.content)
-                        st.success(f"GeoJSON descargado correctamente desde: {download_url}")
-                        ok = True
-                        break
-                    except Exception as ee:
-                        # try next
-                        last_exc = ee
-                if not ok:
-                    st.warning(f"No fue posible descargar el geojson: {last_exc}")
-
-        @st.cache_data
-        def preparar_analisis_global(df):
-            dfg = df.copy()
-            col_gan = 'GANANCIA (PÉRDIDA)'
-            col_year = 'Año de Corte'
-
-            dfg = dfg.sort_values(['NIT', col_year])
-            dfg['GAN_ANT'] = dfg.groupby('NIT')[col_gan].shift(1)
-            dfg['DELTA_ABS'] = dfg[col_gan] - dfg['GAN_ANT']
-            dfg['DELTA_PCT'] = np.where(dfg['GAN_ANT'].abs() > 0, 100 * dfg['DELTA_ABS'] / dfg['GAN_ANT'].abs(), np.nan)
-
-            agg_historico = (
-                dfg.groupby('MACROSECTOR').agg(
-                    patrimonio_med=('TOTAL PATRIMONIO', 'median'),
-                    growth_med_pct=('DELTA_PCT', 'median'),
-                    sum_delta_mill=('DELTA_ABS', 'sum'),
-                    pct_negatives=('DELTA_ABS', lambda x: 100 * (x < 0).sum() / max(1, x.count())),
-                    n_empresas=('NIT', 'nunique')
-                )
-                .reset_index()
-                .dropna(subset=['patrimonio_med'])
-            )
-
-            latest_year = int(dfg[col_year].max())
-            df_latest = dfg[dfg[col_year] == latest_year].copy()
-
-            bins = [0, 50000, 200000, 1000000, np.inf]
-            labels = ['Pequeña', 'Mediana', 'Grande', 'Mega-empresa']
-            df_latest['SEGMENTO_ACTIVOS'] = pd.cut(df_latest['TOTAL ACTIVOS'], bins=bins, labels=labels)
-
-            return agg_historico, df_latest, dfg
-
-        @st.cache_data
-        def calcular_predicciones_modelo(df_latest, _modelo):
-            modelo_local = _modelo
-            if modelo_local is None or df_latest.empty:
-                return df_latest.assign(DELTA_PRED_MILL=np.nan, GAN_PRED_MILL=np.nan, GROWTH_PCT=np.nan)
-
-            features_num = ['LOG_TOTAL ACTIVOS', 'LOG_INGRESOS OPERACIONALES', 'LOG_TOTAL PASIVOS',
-                            'RATIO_ENDEUDAMIENTO', 'RATIO_PATRIMONIAL', 'ROA_ANTERIOR', 'GANANCIA_ANTERIOR']
-            features_cat = ['MACROSECTOR', 'REGIÓN']
-
-            dfm = df_latest.copy()
-            factor = 1000.0
-            dfm['LOG_TOTAL ACTIVOS'] = np.log1p(np.maximum(dfm['TOTAL ACTIVOS'] / factor, 0))
-            dfm['LOG_INGRESOS OPERACIONALES'] = np.log1p(np.maximum(dfm['INGRESOS OPERACIONALES'] / factor, 0))
-            dfm['LOG_TOTAL PASIVOS'] = np.log1p(np.maximum(dfm['TOTAL PASIVOS'] / factor, 0))
-
-            # (El expander 'Análisis Global' fue movido a la pestaña principal.)
-
-            # GANANCIA_ANTERIOR como la ganancia actual en unidades del modelo
-            dfm['GANANCIA_ANTERIOR'] = (dfm['GANANCIA (PÉRDIDA)'] / factor)
-
-            # Selección de columnas y limpieza
-            cols_X = features_num + features_cat
-            X = dfm.reindex(columns=cols_X)
-            X = X.replace([np.inf, -np.inf], np.nan)
-
-            try:
-                delta_pred = modelo_local.predict(X)
-            except Exception as e:
-                # Si falla, devolvemos NaNs pero no rompemos la app
-                st.warning(f"Error prediciendo con el modelo: {e}")
-                return df_latest.assign(DELTA_PRED_MILL=np.nan, GAN_PRED_MILL=np.nan, GROWTH_PCT=np.nan)
-
-            # delta_pred está en unidades del modelo (miles de millones) -> convertir a Millones
-            delta_pred_mill = np.array(delta_pred) * factor
-            gan_actual_mill = dfm['GANANCIA (PÉRDIDA)'].values
-            gan_pred_mill = gan_actual_mill + delta_pred_mill
-            growth_pct = np.where(np.abs(gan_actual_mill) > 0, 100 * delta_pred_mill / np.abs(gan_actual_mill), np.nan)
-
-            df_out = df_latest.copy()
-            df_out['DELTA_PRED_MILL'] = delta_pred_mill
-            df_out['GAN_PRED_MILL'] = gan_pred_mill
-            df_out['GROWTH_PCT'] = growth_pct
-            return df_out
-
-        try:
-            agg_sector_hist, df_latest_global, df_hist = preparar_analisis_global(df_mercado)
-        except Exception as e:
-            st.error(f"Error preparando análisis global: {e}")
-            agg_sector_hist = pd.DataFrame()
-            df_latest_global = pd.DataFrame()
-            df_hist = pd.DataFrame()
-
-        # Si el usuario quiere usar el modelo, calcular predicciones cacheadas
-        if use_model and not df_latest_global.empty:
-            with st.spinner('Calculando predicciones del modelo (cacheadas)...'):
-                df_preds = calcular_predicciones_modelo(df_latest_global, modelo_delta)
-                # Agregados por sector usando predicción
-                agg_sector = (
-                    df_preds.groupby('MACROSECTOR').agg(
-                        patrimonio_med=('TOTAL PATRIMONIO', 'median'),
-                        growth_med_pct=('GROWTH_PCT', 'median'),
-                        sum_delta_mill=('DELTA_PRED_MILL', 'sum'),
-                        pct_negatives=('DELTA_PRED_MILL', lambda x: 100 * (x < 0).sum() / max(1, x.count())),
-                        n_empresas=('NIT', 'nunique')
-                    ).reset_index().dropna(subset=['patrimonio_med'])
-                )
-        else:
-            agg_sector = agg_sector_hist
-
-        # 1) Matriz Sectorial (burbuja)
-        if not agg_sector.empty:
-            agg_sector['color'] = np.where(agg_sector['growth_med_pct'] > 5, 'green', np.where(agg_sector['growth_med_pct'] > 0, 'gold', 'red'))
-            # Asegurar que el tamaño de la burbuja sea no-negativo
-            agg_sector['size_val'] = agg_sector['sum_delta_mill'].abs()
-            # Evitar ceros absolutos para que Plotly no reciba tamaños negativos o 0
-            min_size = agg_sector['size_val'].replace(0, np.nan).min()
-            if pd.isna(min_size):
-                # Si todo es 0 o NaN, dar un tamaño constante
-                agg_sector['size_val'] = 1.0
-            else:
-                # Remplazar 0s por una fracción pequeña del mínimo positivo
-                agg_sector['size_val'] = agg_sector['size_val'].replace(0, min_size * 0.1)
-
-            fig_mat = px.scatter(
-                agg_sector.sort_values('size_val', ascending=False),
-                x='patrimonio_med', y='growth_med_pct', size='size_val', color='color',
-                hover_name='MACROSECTOR', hover_data={'patrimonio_med':':,.0f','growth_med_pct':':.2f','sum_delta_mill':':,.0f','n_empresas':True},
-                labels={'patrimonio_med': 'Patrimonio Mediano (Millones)', 'growth_med_pct': 'Δ Ganancia Mediana (%)'},
-                title='Matriz de Potencial y Rentabilidad Sectorial', size_max=80
-            )
-            fig_mat.update_xaxes(type='log')
-            st.plotly_chart(fig_mat, use_container_width=True)
-        else:
-            st.info('No hay datos suficientes para la matriz sectorial.')
-
-        # 2) Dispersión Patrimonio vs Ganancia (log X)
-        if not df_latest_global.empty:
-            df_sc = df_latest_global.dropna(subset=['TOTAL PATRIMONIO', 'GANANCIA (PÉRDIDA)'])
-            if not df_sc.empty:
-                # si usamos predicciones, pinta esas
-                if use_model and 'GAN_PRED_MILL' in locals():
-                    df_sc_plot = df_preds.copy()
-                    y_col = 'GAN_PRED_MILL'
-                    y_label = 'Ganancia Predicha (Millones)'
-                else:
-                    df_sc_plot = df_sc
-                    y_col = 'GANANCIA (PÉRDIDA)'
-                    y_label = 'Ganancia (Millones)'
-
-                # Muestreo para mantener responsividad
-                if len(df_sc_plot) > 5000:
-                    df_sc_plot = df_sc_plot.sample(5000, random_state=42)
-                    st.caption('Muestra aleatoria mostrada (5,000 observaciones) para rapidez.')
-
-                x = df_sc_plot['TOTAL PATRIMONIO'].replace(0, np.nan).dropna()
-                try:
-                    coef = np.polyfit(np.log10(x), df_sc_plot.loc[x.index, y_col], 2)
-                    fit_x = np.logspace(np.log10(x.min()), np.log10(x.max()), 200)
-                    fit_y = np.polyval(coef, np.log10(fit_x))
-                except Exception:
-                    fit_x = []
-                    fit_y = []
-
-                fig_disp = px.scatter(df_sc_plot, x='TOTAL PATRIMONIO', y=y_col, opacity=0.5,
-                                      labels={'TOTAL PATRIMONIO':'Patrimonio (Millones)', y_col:y_label},
-                                      hover_data=['RAZÓN SOCIAL','MACROSECTOR','REGIÓN'],
-                                      title='Proyección Ganancias vs. Solidez Patrimonial (Último Año, escala log)')
-                fig_disp.update_xaxes(type='log')
-                if len(fit_x):
-                    fig_disp.add_traces(px.line(x=fit_x, y=fit_y).data)
-                st.plotly_chart(fig_disp, use_container_width=True)
-            else:
-                st.info('No hay datos para la dispersión global.')
-
-        # 3) Boxplot por tamaño
-        if not df_latest_global.empty:
-            df_box = df_latest_global.dropna(subset=['SEGMENTO_ACTIVOS', 'DELTA_PCT'])
-            if use_model and not df_preds.empty:
-                df_box = df_preds.dropna(subset=['SEGMENTO_ACTIVOS','GROWTH_PCT']).copy()
-                # Evitar duplicar la columna 'DELTA_PCT' (ya existe en df_latest). Reemplazamos/creamos columna única.
-                if 'DELTA_PCT' in df_box.columns:
-                    df_box.drop(columns=['DELTA_PCT'], inplace=True)
-                df_box = df_box.rename(columns={'GROWTH_PCT': 'DELTA_PCT'})
-
-            if not df_box.empty:
-                fig_box = px.box(df_box, x='SEGMENTO_ACTIVOS', y='DELTA_PCT', points='outliers',
-                                 labels={'SEGMENTO_ACTIVOS':'Segmento','DELTA_PCT':'Δ Ganancia (%)'},
-                                 title='Distribución de Crecimiento (Análisis de Colas) por Tamaño')
-                st.plotly_chart(fig_box, use_container_width=True)
-            else:
-                st.info('No hay datos suficientes para boxplots por tamaño.')
-
-        # 4) Mapa Choropleth por Región (si existe geojson)
-        if os.path.exists(geojson_path) and not df_hist.empty:
-            import json
-            try:
-                with open(geojson_path, 'r', encoding='utf-8') as f:
-                    geo = json.load(f)
-                if use_model and not df_preds.empty:
-                    reg_agg = df_preds.groupby('REGIÓN').apply(lambda d: 100 * (d['DELTA_PRED_MILL'] < 0).sum() / max(1, d['DELTA_PRED_MILL'].count())).reset_index(name='pct_neg')
-                else:
-                    reg_agg = df_hist.groupby('REGIÓN').apply(lambda d: 100 * (d['DELTA_ABS'] < 0).sum() / max(1, d['DELTA_ABS'].count())).reset_index(name='pct_neg')
-
-                fig_map = px.choropleth(reg_agg, geojson=geo, locations='REGIÓN', color='pct_neg', featureidkey='properties.name',
-                                        color_continuous_scale='YlOrRd', title='Porcentaje de Empresas con Δ Ganancia Negativa (%) por Región')
-                fig_map.update_geos(fitbounds="locations", visible=False)
-                st.plotly_chart(fig_map, use_container_width=True)
-            except Exception as e:
-                st.warning(f"Error al renderizar mapa: {e}")
-        else:
-            st.info("Para mostrar el mapa, añade 'data/colombia_departments.geojson' con geometrías de departamentos o utiliza el botón de descarga.")
-
-        st.markdown('---')
-
-    st.markdown("### 1. Indicadores Clave (KPIs)")
+    col_header, col_toggle = st.columns([3, 1])
+    with col_header:
+        st.markdown(f"### 🇨🇴 Competitividad Nacional")
+        st.caption("Análisis comparativo de todos los sectores.")
+    with col_toggle:
+        ver_futuro_global = st.toggle("🔮 Proyección IA (2025)", value=False, key="toggle_global")
     
-    df_actual = df_filtrado[df_filtrado['Año de Corte'] == anio_max]
-    
-    if df_actual.empty:
-        st.warning("No hay datos suficientes.")
+    if ver_futuro_global:
+        df_visual = simular_futuro_sectores(df_historico_anio, modelo_delta)
+        estado_txt = "PROYECTADO (IA)"
     else:
-        # Cálculos (Ya están en Millones gracias a la carga de datos)
-        roa_prom = df_actual['ROA'].median() * 100
-        deuda_prom = df_actual['ENDEUDAMIENTO'].median() * 100
-        margen_prom = df_actual['MARGEN_NETO'].median() * 100
-        ingresos_prom = df_actual['INGRESOS OPERACIONALES'].median() 
-        
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("ROA Típico", f"{roa_prom:.1f}%", help="Eficiencia (Mediana)")
-        col2.metric("Nivel de Deuda", f"{deuda_prom:.1f}%", delta_color="inverse")
-        col3.metric("Margen Neto", f"{margen_prom:.1f}%")
-        col4.metric("Ingresos Típicos", f"${ingresos_prom:,.0f} M", help="Millones de COP")
-        
-        st.markdown("---")
+        df_visual = df_historico_anio.groupby('MACROSECTOR').agg({
+            'TOTAL ACTIVOS': 'median', 'TOTAL PASIVOS': 'median',
+            'INGRESOS OPERACIONALES': 'median', 'GANANCIA (PÉRDIDA)': 'median',
+            'ROA': 'median', 'ENDEUDAMIENTO': 'median',
+            'ROTACION_ACTIVOS': 'median', 'MARGEN_NETO': 'median'
+        }).reset_index()
+        estado_txt = "HISTÓRICO (REAL)"
 
-        c1, c2 = st.columns([1.5, 1])
-        
-        with c1:
-            st.subheader("Mapa de Riesgo vs. Retorno")
-            # Scatter: Eje X=Endeudamiento, Eje Y=ROA
-            fig_risk = px.scatter(
-                df_actual, 
-                x='ENDEUDAMIENTO', 
-                y='ROA', 
-                size='TOTAL ACTIVOS', # El tamaño de burbuja usa Activos en Millones
-                color='GANANCIA (PÉRDIDA)',
-                hover_name='RAZÓN SOCIAL',
-                range_x=[0, 1.2], 
-                range_y=[-0.5, 0.5],
-                color_continuous_scale='Viridis',
-                title=f"Eficiencia vs. Endeudamiento ({anio_max})"
-            )
-            fig_risk.update_layout(xaxis_title="Endeudamiento", yaxis_title="ROA")
-            st.plotly_chart(fig_risk, use_container_width=True)
-            
-        with c2:
-            st.subheader("Distribución de Ganancias")
-            fig_hist = px.box(
-                df_actual, 
-                y='GANANCIA (PÉRDIDA)', 
-                points="outliers",
-                title=f"Rango de Utilidades (Millones)",
-                color_discrete_sequence=['#636EFA']
-            )
-            st.plotly_chart(fig_hist, use_container_width=True)
+    volumenes = df_historico_anio.groupby('MACROSECTOR')['INGRESOS OPERACIONALES'].sum().reset_index()
+    df_visual = df_visual.merge(volumenes, on='MACROSECTOR', suffixes=('', '_TOTAL'))
+    df_visual['VOLUMEN_TOTAL'] = df_visual['INGRESOS OPERACIONALES_TOTAL']
 
-        st.markdown("---")
-        st.subheader(f"🏆 Top 10 Líderes (Ingresos en Millones)")
-        top_10 = df_actual.nlargest(10, 'INGRESOS OPERACIONALES')[['RAZÓN SOCIAL', 'INGRESOS OPERACIONALES', 'ROA', 'MARGEN_NETO']]
+    # KPIs GLOBALES
+    roa_pais = df_visual['ROA'].median() * 100
+    margen_pais = df_visual['MARGEN_NETO'].median() * 100
+    deuda_pais = df_visual['ENDEUDAMIENTO'].median() * 100
+    
+    k1, k2, k3 = st.columns(3)
+    k1.metric(f"Eficiencia País ({estado_txt})", f"{roa_pais:.2f}%")
+    k2.metric("Riesgo País (Deuda)", f"{deuda_pais:.2f}%", delta_color="inverse")
+    k3.metric("Margen Neto Promedio", f"{margen_pais:.2f}%")
+    st.divider()
+
+    st.subheader("1. Mapa de Riesgo vs. Retorno")
+    df_visual_bubbles = df_visual.sort_values(by='VOLUMEN_TOTAL', ascending=False)
+    fig_bubbles = px.scatter(
+        df_visual_bubbles, x="ENDEUDAMIENTO", y="ROA", size="VOLUMEN_TOTAL", color="MACROSECTOR",
+        hover_name="MACROSECTOR", text="MACROSECTOR", size_max=70,
+        title=f"Posición Estratégica ({estado_txt})",
+        labels={"ENDEUDAMIENTO": "Deuda", "ROA": "Rentabilidad"}
+    )
+    fig_bubbles.update_traces(textposition='middle center', textfont=dict(color='white', size=10))
+    fig_bubbles.add_hline(y=0, line_dash="dash", line_color="gray")
+    fig_bubbles.update_layout(showlegend=False, height=550)
+    st.plotly_chart(fig_bubbles, use_container_width=True)
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    st.subheader("2. Mapa de Calor del Mercado")
+    df_tree = df_visual[df_visual['GANANCIA (PÉRDIDA)'] > 0].copy()
+    if not df_tree.empty:
+        fig_tree = px.treemap(
+            df_tree, path=['MACROSECTOR'], values='VOLUMEN_TOTAL', color='GANANCIA (PÉRDIDA)',
+            color_continuous_scale='RdYlGn', color_continuous_midpoint=0,
+            title=f"Dominio de Mercado y Rentabilidad ({estado_txt})"
+        )
+        fig_tree.update_layout(height=500)
+        st.plotly_chart(fig_tree, use_container_width=True)
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    st.subheader("3. Velocidad del Negocio")
+    df_visual_sorted = df_visual.sort_values(by='ROTACION_ACTIVOS', ascending=False)
+    fig_bar = px.bar(
+        df_visual_sorted, x="ROTACION_ACTIVOS", y="MACROSECTOR", orientation='h',
+        text_auto='.2f', color="MACROSECTOR", title=f"Eficiencia Operativa ({estado_txt})"
+    )
+    fig_bar.update_layout(showlegend=False, height=500)
+    st.plotly_chart(fig_bar, use_container_width=True)
+
+
+# ==============================================================================
+# PESTAÑA 2: CONTEXTO SECTORIAL
+# ==============================================================================
+with tab_sector:
+    col_head_sec, col_toggle_sec = st.columns([3, 1])
+    with col_head_sec:
+        st.markdown(f"### 📊 Análisis del Sector: **{sector_sel}**")
+        st.caption(f"Comparativa Nacional vs. Regional ({anio_max})")
+    with col_toggle_sec:
+        ver_futuro_sector = st.toggle("🔮 Simular Empresas (IA)", value=False, key="toggle_sector")
+
+    df_sector_nacional_base = df_historico_anio[df_historico_anio['MACROSECTOR'] == sector_sel].copy()
+    
+    if ver_futuro_sector:
+        st.toast(f"Proyectando el futuro de {len(df_sector_nacional_base)} empresas...", icon="🚀")
+        with st.spinner('La IA está analizando empresa por empresa...'):
+            df_sector_nacional = simular_futuro_empresas(df_sector_nacional_base, modelo_delta)
+        estado_sec_txt = "PROYECTADO 2025"
+    else:
+        df_sector_nacional = df_sector_nacional_base
+        estado_sec_txt = "HISTÓRICO REAL"
         
+    df_sector_regional = df_sector_nacional[df_sector_nacional['REGIÓN'] == region_sel].copy()
+
+    st.markdown(f"#### 1. Radiografía Nacional ({estado_sec_txt})")
+    st.caption("Comportamiento de todas las empresas del sector en el país.")
+    
+    df_scatter = df_sector_nacional[(df_sector_nacional['ROA'] > -0.8) & (df_sector_nacional['ROA'] < 0.8)]
+    fig_companies = px.scatter(
+        df_scatter, x="INGRESOS OPERACIONALES", y="ROA", color="REGIÓN",
+        hover_name="RAZÓN SOCIAL", log_x=True, 
+        title=f"Dispersión: Tamaño vs. Eficiencia ({estado_sec_txt})",
+        labels={"INGRESOS OPERACIONALES": "Ingresos (Log)", "ROA": "Rentabilidad (ROA)"}
+    )
+    fig_companies.update_layout(height=500)
+    st.plotly_chart(fig_companies, use_container_width=True)
+    st.markdown("<br>", unsafe_allow_html=True)
+    
+    metric_dona = 'GANANCIA (PÉRDIDA)' if ver_futuro_sector else 'INGRESOS OPERACIONALES'
+    label_dona = 'Ganancias Proyectadas' if ver_futuro_sector else 'Ingresos Reales'
+    df_share = df_sector_nacional[df_sector_nacional[metric_dona] > 0].groupby('REGIÓN')[metric_dona].sum().reset_index()
+    fig_donut = px.pie(
+        df_share, values=metric_dona, names='REGIÓN', hole=0.4,
+        title=f"Participación Regional por {label_dona}"
+    )
+    fig_donut.update_traces(textposition='inside', textinfo='percent+label')
+    fig_donut.update_layout(showlegend=False, height=500)
+    st.plotly_chart(fig_donut, use_container_width=True)
+
+    st.divider()
+
+    st.markdown(f"#### 2. Benchmarking: {region_sel} vs. País")
+    if df_sector_regional.empty:
+        st.warning(f"No hay empresas en {region_sel} para este sector.")
+    else:
+        roa_nac = df_sector_nacional['ROA'].median() * 100
+        roa_reg = df_sector_regional['ROA'].median() * 100
+        margen_nac = df_sector_nacional['MARGEN_NETO'].median() * 100
+        margen_reg = df_sector_regional['MARGEN_NETO'].median() * 100
+        
+        c1, c2, c3 = st.columns(3)
+        c1.metric(f"ROA Regional ({estado_sec_txt})", f"{roa_reg:.2f}%", delta=f"{roa_reg - roa_nac:.2f}% vs País")
+        c2.metric("Margen Neto", f"{margen_reg:.2f}%", delta=f"{margen_reg - margen_nac:.2f}% vs País")
+        c3.metric("Empresas Analizadas", f"{len(df_sector_regional)}")
+        
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.subheader(f"🏆 Top 10 Líderes en {region_sel}")
+        top_10 = df_sector_regional.nlargest(10, 'INGRESOS OPERACIONALES')[['RAZÓN SOCIAL', 'INGRESOS OPERACIONALES', 'GANANCIA (PÉRDIDA)', 'ROA']]
         st.dataframe(
-            top_10.style.format({
-                'INGRESOS OPERACIONALES': '${:,.0f}', 
-                'ROA': '{:.1%}', 
-                'MARGEN_NETO': '{:.1%}'
-            }), 
-            use_container_width=True
+            top_10,
+            column_config={
+                "INGRESOS OPERACIONALES": st.column_config.ProgressColumn("Ingresos ($M)", format="$%d M", min_value=0, max_value=top_10['INGRESOS OPERACIONALES'].max()),
+                "GANANCIA (PÉRDIDA)": st.column_config.NumberColumn("Ganancia ($M)", format="$%d M"),
+                "ROA": st.column_config.NumberColumn("ROA", format="%.2f%%")
+            },
+            hide_index=True, use_container_width=True
         )
 
+
 # ==============================================================================
-# PESTAÑA 2: MICRO (SIMULADOR)
+# PESTAÑA 3: SIMULADOR IA
 # ==============================================================================
-with tab_micro:
-    st.markdown("### 🔮 Proyección Financiera")
-    st.caption("Ingresa los datos de tu empresa en **Millones de Pesos**.")
-    
+with tab_simulador:
+    st.markdown("### 🔮 Valora Predictor")
+    st.markdown("#### 🛡️ Transparencia del Modelo IA")
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Certeza del Modelo (R²)", "77.4%", help="El modelo explica el 77.4% de los patrones de crecimiento.")
+    k2.metric("Base de Conocimiento", "26k+ Empresas", help="Entrenado con datos reales de Supersociedades.")
+    k3.markdown("**Interpretación:**<br>Estimación de inercia financiera basada en patrones históricos.", unsafe_allow_html=True)
+    st.divider()
+
     with st.container(border=True):
-        col_in1, col_in2, col_in3 = st.columns(3)
-        
-        # INPUTS EN MILLONES (Valores por defecto ajustados: 50,000 Millones = 50 Miles de Millones)
-        with col_in1:
-            st.markdown("#### 1. Tamaño")
+        st.markdown("**Ingresa los datos de tu empresa:**")
+        c1, c2, c3 = st.columns(3)
+        with c1: 
             activos_mill = st.number_input("Total Activos ($M)", min_value=1.0, value=50000.0, step=1000.0)
             patrimonio_mill = st.number_input("Total Patrimonio ($M)", value=20000.0, step=1000.0)
-            
-        with col_in2:
-            st.markdown("#### 2. Operación")
-            ingresos_mill = st.number_input("Ingresos Operacionales ($M)", min_value=0.0, value=60000.0, step=1000.0)
-            pasivos_mill = st.number_input("Total Pasivos ($M)", min_value=0.0, value=30000.0, step=1000.0)
-            
-        with col_in3:
-            st.markdown("#### 3. Historia")
-            ganancia_actual_mill = st.number_input("Ganancia Año Actual ($M)", value=5000.0, step=500.0)
-            
-        btn_predecir = st.button("Simular Crecimiento ⚡", type="primary", use_container_width=True)
+        with c2:
+            ingresos_mill = st.number_input("Ingresos ($M)", min_value=0.0, value=60000.0, step=1000.0)
+            pasivos_mill = st.number_input("Pasivos ($M)", min_value=0.0, value=30000.0, step=1000.0)
+        with c3:
+            ganancia_actual_mill = st.number_input("Ganancia Actual ($M)", value=5000.0, step=500.0)
+        btn_predecir = st.button("Simular Escenario ⚡", type="primary", use_container_width=True)
 
     if btn_predecir:
-        # --- TRADUCCIÓN PARA LA IA ---
-        # El modelo fue entrenado en "Miles de Millones".
-        # Debemos dividir los inputs del usuario por 1,000 antes de enviarlos al modelo.
-        factor_conv = 1000.0
-        
-        inputs_modelo = {
-            'TOTAL ACTIVOS': activos_mill / factor_conv,
-            'TOTAL PASIVOS': pasivos_mill / factor_conv,
-            'TOTAL PATRIMONIO': patrimonio_mill / factor_conv,
-            'INGRESOS OPERACIONALES': ingresos_mill / factor_conv,
-            'GANANCIA_ANTERIOR': ganancia_actual_mill / factor_conv,
-            'MACROSECTOR': sector_sel,
-            'REGIÓN': region_sel
-        }
-        
+        factor = 1000.0
+        inputs = {'TOTAL ACTIVOS': activos_mill/factor, 'TOTAL PASIVOS': pasivos_mill/factor, 
+                  'TOTAL PATRIMONIO': patrimonio_mill/factor, 'INGRESOS OPERACIONALES': ingresos_mill/factor, 
+                  'GANANCIA_ANTERIOR': ganancia_actual_mill/factor, 'MACROSECTOR': sector_sel, 'REGIÓN': region_sel}
         try:
-            # 1. Procesar y Predecir (El modelo devuelve Miles de Millones)
-            df_procesado = procesar_datos_usuario(inputs_modelo)
-            ganancia_futura_mm, delta_predicho_mm = predecir_ganancia_futura(modelo_delta, df_procesado, inputs_modelo['GANANCIA_ANTERIOR'])
+            df_proc = procesar_datos_usuario(inputs)
+            fut, delta = predecir_ganancia_futura(modelo_delta, df_proc, inputs['GANANCIA_ANTERIOR'])
             
-            # 2. Convertir Resultado de vuelta a Millones para mostrar al usuario
-            delta_predicho_mill = delta_predicho_mm * factor_conv
-            ganancia_futura_mill = ganancia_futura_mm * factor_conv
+            st.markdown("#### 🎯 Resultados de la Proyección")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Proyección", f"${fut*factor:,.0f} M", delta=f"{delta*factor:,.0f} M")
+            c2.metric("Crecimiento", f"{(delta/abs(inputs['GANANCIA_ANTERIOR']))*100:+.2f}%")
+            c3.metric("Tendencia", "Expansión" if delta>0 else "Contracción", delta=delta*factor, delta_color="normal")
             
-            # Crecimiento Porcentual (No necesita conversión)
-            crecimiento_pct = (delta_predicho_mm / abs(inputs_modelo['GANANCIA_ANTERIOR'])) * 100 if inputs_modelo['GANANCIA_ANTERIOR'] != 0 else 0
-            
-            # --- RESULTADOS ---
-            st.divider()
-            
-            # Diagnóstico
-            roa_usuario = (ganancia_actual_mill / activos_mill) * 100
-            st.caption(f"Diagnóstico: Tu ROA actual es del **{roa_usuario:.1f}%**.")
-            
-            c_res1, c_res2, c_res3 = st.columns(3)
-            
-            # Mostramos todo en Millones
-            c_res1.metric("Proyección (Año Siguiente)", f"${ganancia_futura_mill:,.0f} M", 
-                          delta=f"{delta_predicho_mill:,.0f} M (Cambio)")
-            
-            c_res2.metric("Crecimiento Esperado", f"{crecimiento_pct:+.1f}%")
-            
-            estatus = "Expansión" if delta_predicho_mill > 0 else "Contracción"
-            c_res3.metric("Tendencia", estatus, delta="Positiva" if delta_predicho_mill > 0 else "Negativa")
-            
-            # Gráfico Cascada
-            st.subheader("Puente de Valor (Millones COP)")
-            
-            fig_waterfall = go.Figure(go.Waterfall(
-                name = "Flujo", orientation = "v",
-                measure = ["absolute", "relative", "total"],
-                x = ["Actual", "Variación", "Proyectado"],
-                textposition = "outside",
-                # Formateamos texto en el gráfico para que se vea limpio
-                text = [f"{ganancia_actual_mill:,.0f}", f"{delta_predicho_mill:+,.0f}", f"{ganancia_futura_mill:,.0f}"],
-                y = [ganancia_actual_mill, delta_predicho_mill, ganancia_futura_mill],
-                connector = {"line":{"color":"rgb(63, 63, 63)"}},
-            ))
-            fig_waterfall.update_layout(title = "Evolución de Ganancias", showlegend = False)
-            st.plotly_chart(fig_waterfall, use_container_width=True)
-            
-        except Exception as e:
-            st.error(f"Error en el cálculo: {e}")
-        st.markdown("---")
-        st.caption("Fuente de Datos:")
-        st.link_button("🔗 Ver Datos Abiertos (Supersociedades)", "https://www.datos.gov.co/Comercio-Industria-y-Turismo/10-000-Empresas-mas-Grandes-del-Pa-s/6cat-2gcs/about_data")
+            fig_w = go.Figure(go.Waterfall(name="20", orientation="v", measure=["absolute", "relative", "total"],
+                x=["Actual", "Impacto IA", "Proyección"], y=[ganancia_actual_mill, delta*factor, fut*factor],
+                text=[f"{ganancia_actual_mill:,.0f}", f"{delta*factor:+,.0f}", f"{fut*factor:,.0f}"], connector={"line":{"color":"#636EFA"}}))
+            st.plotly_chart(fig_w, use_container_width=True)
+        except Exception as e: st.error(f"Error: {e}")
+
+# ==============================================================================
+# FOOTER ESTÁTICO (EQUIPO)
+# ==============================================================================
+st.markdown("""
+<div class="footer">
+    <div class="team-title">Equipo de Desarrollo</div>
+    <div class="footer-content">
+        <div class="footer-item">
+            🚀 <b>Valora App</b>
+        </div>
+        <div class="footer-item">|</div>
+        <div class="footer-item">
+            <a href="https://www.linkedin.com/in/ldalzatef/" target="_blank">👩‍💻 Leidy Alzate</a>
+        </div>
+        <div class="footer-item">
+            <a href="https://www.linkedin.com/in/josuehernandezbautista/" target="_blank">🧑‍💻 Josué Hernández</a>
+        </div>
+        <div class="footer-item">
+            <a href="https://www.linkedin.com/in/juanjosecifuentesrodriguez/" target="_blank">🧑‍💻 Juan Cifuentes</a>
+        </div>
+    </div>
+    <div style="margin-top: 10px; font-size: 12px; color: gray;">
+        Proyecto desarrollado para fines educativos y de investigación en el marco del concurso Datos al Ecosistema 2025.
+    </div>
+    <div style="margin-top: 10px; font-size: 12px; color: gray;">
+        © 2025 Valora App. Todos los derechos reservados.
+    </div>
+        <div style="margin-top: 10px; font-size: 12px; color: gray;">
+        versión 1.0.0
+    </div>
+</div>
+""", unsafe_allow_html=True)
